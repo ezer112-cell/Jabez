@@ -19,8 +19,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ko">
-      <body className="min-h-screen flex justify-center bg-[#d8d6cf]">
-        <div className="w-full max-w-md min-h-screen bg-[#ebe9e4] shadow-2xl flex flex-col relative overflow-x-hidden">
+      <body className="min-h-screen flex justify-center bg-[#e5dec9]">
+        <div className="w-full max-w-md min-h-screen bg-[#F6EFE5] shadow-2xl flex flex-col relative overflow-x-hidden">
           {children}
         </div>
       </body>

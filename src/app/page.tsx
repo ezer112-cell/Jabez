@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   BookOpen,
   StickyNote,
@@ -20,6 +20,8 @@ import {
   Lock,
   Unlock,
   Lightbulb,
+  CloudUpload,
+  RefreshCw,
 } from "lucide-react";
 import {
   VerseCard,
@@ -30,13 +32,19 @@ import {
 
 type TabType = "cover" | "cards" | "memorize" | "exam";
 
-const STORAGE_KEY = "jabez_2026_verses_v2";
+const STORAGE_KEY = "jabez_2026_verses_v3";
 const ADMIN_PIN = "1234";
 
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<TabType>("cover");
-  const [verses, setVerses] = useState<VerseCard[]>([]);
+  const [verses, setVerses] = useState<VerseCard[]>(INITIAL_VERSES);
   const [isLoaded, setIsLoaded] = useState(false);
+
+  // 실시간 서버 동기화 / 재배포 상태
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [syncMessage, setSyncMessage] = useState<string>("");
+  const [hasUnsavedServerChanges, setHasUnsavedServerChanges] =
+    useState<boolean>(false);
 
   // 메뉴2: 관리자 보호 및 더보기(접기/펼치기) 상태
   const [isAddPanelOpen, setIsAddPanelOpen] = useState<boolean>(false);
@@ -45,7 +53,7 @@ export default function HomePage() {
   const [pinError, setPinError] = useState<string>("");
 
   // 메뉴2: 말씀카드 입력/수정 상태
-  const [orderInput, setOrderInput] = useState<string>("");
+  const [orderInput, setOrderInput] = useState<string>("13");
   const [referenceInput, setReferenceInput] = useState<string>("");
   const [textInput, setTextInput] = useState<string>("");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -69,33 +77,101 @@ export default function HomePage() {
   const [examStarted, setExamStarted] = useState<boolean>(false);
   const [examFinished, setExamFinished] = useState<boolean>(false);
 
-  // 로컬 스토리지 불러오기
-  useEffect(() => {
+  // 서버(/api/verses)에서 최신 공유 말씀 불러오기
+  const fetchLatestVersesFromServer = useCallback(async (showNotice = false) => {
+    try {
+      const res = await fetch(`/api/verses?t=${Date.now()}`, {
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.verses) && data.verses.length > 0) {
+          setVerses(data.verses);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(data.verses));
+          const maxOrder = Math.max(
+            ...data.verses.map((v: VerseCard) => v.order),
+            0
+          );
+          setOrderInput(String(maxOrder + 1));
+          if (showNotice) {
+            setSyncMessage("최신 말씀 목록을 불러왔습니다.");
+            setTimeout(() => setSyncMessage(""), 3000);
+          }
+          return;
+        }
+      }
+    } catch {
+      // 오프라인 또는 오류 시 로컬 캐시 사용
+    }
+
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
           setVerses(parsed);
-          setOrderInput(String(parsed.length + 1));
+          const maxOrder = Math.max(...parsed.map((v: VerseCard) => v.order), 0);
+          setOrderInput(String(maxOrder + 1));
         }
-      } else {
-        setVerses(INITIAL_VERSES);
-        setOrderInput(String(INITIAL_VERSES.length + 1));
       }
     } catch {
-      setVerses(INITIAL_VERSES);
-      setOrderInput("4");
+      // ignore
     }
-    setIsLoaded(true);
   }, []);
 
-  // 로컬 스토리지 저장
+  // 첫 접속 시 서버에서 실시간 최신 말씀 목록 조회
+  useEffect(() => {
+    fetchLatestVersesFromServer(false).finally(() => {
+      setIsLoaded(true);
+    });
+  }, [fetchLatestVersesFromServer]);
+
+  // 로컬 스토리지 백업 저장
   useEffect(() => {
     if (isLoaded) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(verses));
     }
   }, [verses, isLoaded]);
+
+  // 서버(GitHub + Vercel 재배포)에 말씀 목록 저장 및 전체 실시간 공유
+  const syncVersesToServer = async (
+    targetVerses: VerseCard[],
+    actionDescription: string
+  ) => {
+    setIsSyncing(true);
+    setSyncMessage("전체 사용자에게 실시간 공유 및 서버 저장 중...");
+    try {
+      const res = await fetch("/api/verses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pin: ADMIN_PIN,
+          verses: targetVerses,
+          message: actionDescription,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setHasUnsavedServerChanges(false);
+        setSyncMessage(
+          "✅ 전체 공유 및 재배포 저장 완료! 이제 모든 사람의 핸드폰에 최신 말씀이 보입니다."
+        );
+      } else {
+        setHasUnsavedServerChanges(true);
+        setSyncMessage(
+          `⚠️ 내 기기에는 저장되었으나 전체 서버 반영에 실패했습니다. 아래 [전체 공유 및 재배포] 버튼을 다시 눌러주세요.`
+        );
+      }
+    } catch {
+      setHasUnsavedServerChanges(true);
+      setSyncMessage(
+        "⚠️ 네트워크 오류로 기기에만 임시 저장되었습니다. 아래 [전체 공유 및 재배포] 버튼을 눌러주세요."
+      );
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   // 날짜/순서(order) 오름차순 정렬된 말씀 목록
   const sortedVerses = [...verses].sort((a, b) => a.order - b.order);
@@ -112,7 +188,7 @@ export default function HomePage() {
     }
   };
 
-  // 관리자 권한이 필요한 액션(수정/삭제) 호출 시 체크 헬퍼
+  // 관리자 권한이 필요한 액션(수정/삭제/재배포) 호출 시 체크 헬퍼
   const ensureAdminOrPrompt = (): boolean => {
     if (isAdminUnlocked) return true;
     const entered = window.prompt(
@@ -129,8 +205,8 @@ export default function HomePage() {
     return false;
   };
 
-  // 메뉴2: 말씀카드 추가 또는 수정 저장
-  const handleAddOrUpdateVerse = (e: React.FormEvent) => {
+  // 메뉴2: 말씀카드 추가 또는 수정 저장 (저장 즉시 전체 공유 API도 자동 호출)
+  const handleAddOrUpdateVerse = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isAdminUnlocked) {
       alert("비밀번호 인증 후 추가 및 수정할 수 있습니다.");
@@ -151,19 +227,21 @@ export default function HomePage() {
       return;
     }
 
+    let nextVerses: VerseCard[];
+    let actionDesc: string;
+
     if (editingId) {
-      setVerses((prev) =>
-        prev.map((v) =>
-          v.id === editingId
-            ? {
-                ...v,
-                order: orderNum,
-                reference: referenceInput.trim(),
-                text: textInput.trim(),
-              }
-            : v
-        )
+      nextVerses = verses.map((v) =>
+        v.id === editingId
+          ? {
+              ...v,
+              order: orderNum,
+              reference: referenceInput.trim(),
+              text: textInput.trim(),
+            }
+          : v
       );
+      actionDesc = `Update Day ${orderNum} (${referenceInput.trim()})`;
       setEditingId(null);
     } else {
       const newCard: VerseCard = {
@@ -172,27 +250,37 @@ export default function HomePage() {
         reference: referenceInput.trim(),
         text: textInput.trim(),
       };
-      setVerses((prev) => [...prev, newCard]);
+      nextVerses = [...verses, newCard];
+      actionDesc = `Add Day ${orderNum} (${referenceInput.trim()})`;
     }
 
+    setVerses(nextVerses);
+
     const nextOrder =
-      editingId !== null
-        ? Math.max(...verses.map((v) => v.order), orderNum) + 1
-        : orderNum + 1;
+      Math.max(...nextVerses.map((v) => v.order), orderNum) + 1;
     setOrderInput(String(nextOrder));
     setReferenceInput("");
     setTextInput("");
+
+    // 서버에 즉시 실시간 공유 및 재배포 요청
+    await syncVersesToServer(nextVerses, actionDesc);
   };
 
-  // 메뉴2: 쪽지 삭제 (관리자 전용)
-  const handleDeleteVerse = (id: string) => {
+  // 메뉴2: 쪽지 삭제 (관리자 전용, 삭제 즉시 서버 반영)
+  const handleDeleteVerse = async (id: string) => {
     if (!ensureAdminOrPrompt()) return;
-    setVerses((prev) => prev.filter((v) => v.id !== id));
+    const target = verses.find((v) => v.id === id);
+    const nextVerses = verses.filter((v) => v.id !== id);
+    setVerses(nextVerses);
     if (editingId === id) {
       setEditingId(null);
       setReferenceInput("");
       setTextInput("");
     }
+    await syncVersesToServer(
+      nextVerses,
+      `Delete Day ${target?.order ?? ""} (${target?.reference ?? ""})`
+    );
   };
 
   // 메뉴2: 쪽지 수정 모드로 불러오기 (관리자 전용)
@@ -204,6 +292,15 @@ export default function HomePage() {
     setReferenceInput(card.reference);
     setTextInput(card.text);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  // 메뉴2 하단: '전체 공유 및 재배포 (모든 사람에게 최신화)' 버튼 핸들러
+  const handleManualRedeploySync = async () => {
+    if (!ensureAdminOrPrompt()) return;
+    await syncVersesToServer(
+      verses,
+      `Manual sync & redeploy (${verses.length} verses)`
+    );
   };
 
   // 메뉴3: 힌트 버튼 클릭 시 처음부터 한 단어씩 입력란에 채워넣기
@@ -218,7 +315,6 @@ export default function HomePage() {
     const currentInput = (practiceInputs[card.id] || "").trim();
     const currentCount = hintCounts[card.id] || 0;
 
-    // 현재 입력란에 적힌 내용이 앞부분 정답 단어 몇 개와 일치하는지 확인하여 자연스럽게 다음 단어를 이어붙임
     let nextCount = currentCount + 1;
     if (!currentInput) {
       nextCount = 1;
@@ -232,7 +328,10 @@ export default function HomePage() {
       ) {
         matchedPrefix++;
       }
-      nextCount = Math.min(words.length, Math.max(matchedPrefix + 1, currentCount + 1));
+      nextCount = Math.min(
+        words.length,
+        Math.max(matchedPrefix + 1, currentCount + 1)
+      );
     }
 
     const hintText = words.slice(0, nextCount).join(" ");
@@ -321,7 +420,6 @@ export default function HomePage() {
             );
           }
           if (part.type === "missing") {
-            // 누락된 부분: 붉은색 굵은 글씨
             return (
               <span
                 key={idx}
@@ -332,14 +430,17 @@ export default function HomePage() {
               </span>
             );
           }
-          // 잘못 쓴 것(wrong): 괄호에 넣고 취소선
           return (
             <span
               key={idx}
               className="text-slate-500 mx-0.5"
               title="잘못 쓴 부분"
             >
-              (<span className="line-through decoration-red-500 decoration-2">{part.value}</span>)
+              (
+              <span className="line-through decoration-red-500 decoration-2">
+                {part.value}
+              </span>
+              )
             </span>
           );
         })}
@@ -493,7 +594,10 @@ export default function HomePage() {
                 <div className="p-4 pt-2 border-t border-[#ede6da] bg-white">
                   {!isAdminUnlocked ? (
                     /* 관리자 비밀번호 입력 화면 */
-                    <form onSubmit={handleUnlockAdmin} className="space-y-3 py-1">
+                    <form
+                      onSubmit={handleUnlockAdmin}
+                      className="space-y-3 py-1"
+                    >
                       <p className="text-xs text-slate-600">
                         말씀카드 추가 및 수정은 관리자만 가능합니다. 비밀번호를 입력해주세요.
                       </p>
@@ -560,7 +664,10 @@ export default function HomePage() {
                         </div>
                       </div>
 
-                      <form onSubmit={handleAddOrUpdateVerse} className="space-y-3">
+                      <form
+                        onSubmit={handleAddOrUpdateVerse}
+                        className="space-y-3"
+                      >
                         <div className="grid grid-cols-3 gap-2.5">
                           <div>
                             <label className="block text-xs font-semibold text-slate-600 mb-1">
@@ -589,8 +696,10 @@ export default function HomePage() {
                             <input
                               type="text"
                               value={referenceInput}
-                              onChange={(e) => setReferenceInput(e.target.value)}
-                              placeholder="예: 창세기 22:17"
+                              onChange={(e) =>
+                                setReferenceInput(e.target.value)
+                              }
+                              placeholder="예: 창세기 22:12"
                               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1f4e5f] bg-[#f9f9f7]"
                             />
                           </div>
@@ -611,10 +720,15 @@ export default function HomePage() {
 
                         <button
                           type="submit"
-                          className="w-full py-2.5 rounded-xl bg-[#1f4e5f] hover:bg-[#173b48] active:scale-[0.99] text-white font-semibold text-sm shadow transition flex items-center justify-center gap-1.5"
+                          disabled={isSyncing}
+                          className="w-full py-2.5 rounded-xl bg-[#1f4e5f] hover:bg-[#173b48] disabled:opacity-60 active:scale-[0.99] text-white font-semibold text-sm shadow transition flex items-center justify-center gap-1.5"
                         >
                           <Plus className="w-4 h-4" />
-                          {editingId ? "말씀카드 수정 완료" : "말씀카드 추가하기"}
+                          {isSyncing
+                            ? "전체 사용자에게 공유 저장 중..."
+                            : editingId
+                              ? "말씀카드 수정 및 전체 공유"
+                              : "말씀카드 추가 및 전체 공유"}
                         </button>
                       </form>
                     </div>
@@ -623,12 +737,34 @@ export default function HomePage() {
               )}
             </section>
 
+            {/* 실시간 동기화 상태 알림 배너 */}
+            {syncMessage && (
+              <div className="rounded-xl bg-[#e8f0f3] border border-[#b8d0d9] px-3.5 py-2.5 text-xs font-semibold text-[#1f4e5f] flex items-center justify-between gap-2">
+                <span>{syncMessage}</span>
+                <button
+                  type="button"
+                  onClick={() => setSyncMessage("")}
+                  className="text-slate-400 hover:text-slate-600 shrink-0"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             {/* 날짜순(1일차, 2일차, 3일차...) 쪽지 모양 나열 */}
             <section className="space-y-4">
               <div className="flex items-center justify-between px-1">
                 <span className="text-xs font-semibold text-slate-600">
                   등록된 말씀 쪽지 ({sortedVerses.length} / 21개)
                 </span>
+                <button
+                  type="button"
+                  onClick={() => fetchLatestVersesFromServer(true)}
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-[#1f4e5f] hover:underline"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  최신 말씀 새로고침
+                </button>
               </div>
 
               {sortedVerses.length === 0 ? (
@@ -685,6 +821,38 @@ export default function HomePage() {
                 ))
               )}
             </section>
+
+            {/* 맨 아래: 관리자용 '전체 공유 및 재배포' 버튼 (수정한 내용을 서버에 즉시 저장하여 다른 모든 사람에게 최신화) */}
+            {isAdminUnlocked && (
+              <section className="pt-2">
+                <div className="rounded-2xl bg-white/95 border border-[#d4c9b4] p-4 shadow-sm space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-[#1f4e5f]">
+                      모든 성도에게 최신 말씀 공유 (서버 저장 & 재배포)
+                    </span>
+                    {hasUnsavedServerChanges && (
+                      <span className="text-[11px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">
+                        반영 필요
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    말씀 추가·수정 시 자동으로 전체 공유되며, 아래 버튼을 누르면 현재 목록을 서버와 GitHub에 즉시 저장하고 재배포하여 다른 모든 사람의 핸드폰에도 똑같이 최신화합니다.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleManualRedeploySync}
+                    disabled={isSyncing}
+                    className="w-full py-3 rounded-xl bg-[#1f4e5f] hover:bg-[#163a47] disabled:opacity-60 text-white font-bold text-xs shadow transition flex items-center justify-center gap-2"
+                  >
+                    <CloudUpload className="w-4 h-4" />
+                    {isSyncing
+                      ? "서버 저장 및 재배포 진행 중..."
+                      : "전체 공유 및 재배포 (모든 사람에게 최신화)"}
+                  </button>
+                </div>
+              </section>
+            )}
           </div>
         )}
 
